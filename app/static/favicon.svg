@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="溯文 SeekLit">
+  <rect width="32" height="32" rx="4" fill="#16324f"/>
+  <text x="16" y="23" font-family="Songti SC, SimSun, serif" font-size="20" font-weight="700"
+        fill="#f2efe7" text-anchor="middle">溯</text>
+  <circle cx="24" cy="8" r="3.2" fill="none" stroke="#b4762a" stroke-width="1.6"/>
+  <line x1="26.3" y1="10.3" x2="29" y2="13" stroke="#b4762a" stroke-width="1.6" stroke-linecap="round"/>
+</svg>

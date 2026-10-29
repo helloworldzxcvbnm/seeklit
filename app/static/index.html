@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>溯文 SeekLit · 科研文献与笔记混合检索工作台</title>
+<meta name="description" content="把论文、课程笔记与实验记录导入 seekdb，按语义与关键词混合检索，直接给出相关段落与出处。">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">溯</span>
+    <span class="brand-text">
+      <strong>溯文 SeekLit</strong>
+      <em>科研文献与笔记混合检索工作台</em>
+    </span>
+  </div>
+  <div class="badges" id="badges">
+    <span class="badge badge-muted">连接中…</span>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab is-active" data-panel="panel-search" role="tab">检索</button>
+  <button class="tab" data-panel="panel-compare" role="tab">三路对比</button>
+  <button class="tab" data-panel="panel-library" role="tab">文档库</button>
+  <button class="tab" data-panel="panel-ingest" role="tab">导入</button>
+  <button class="tab" data-panel="panel-about" role="tab">运行环境与 SQL 证据</button>
+</nav>
+
+<main>
+  <!-- ======================= 检索 ======================= -->
+  <section class="panel is-active" id="panel-search">
+    <div class="search-head">
+      <form id="search-form" class="searchbar" autocomplete="off">
+        <input id="q" name="q" type="search" placeholder="用一句话描述你要找的内容，例如：持续小幅慢漂移用哪种方法在线检测" aria-label="检索词">
+        <button type="submit" class="btn btn-primary">检索</button>
+      </form>
+      <div class="presets" id="presets"></div>
+    </div>
+
+    <div class="layout">
+      <aside class="controls">
+        <h3>检索模式</h3>
+        <div class="segmented" id="mode-seg" role="radiogroup" aria-label="检索模式">
+          <button data-mode="hybrid" class="is-active" role="radio" aria-checked="true">混合</button>
+          <button data-mode="semantic" role="radio" aria-checked="false">语义</button>
+          <button data-mode="keyword" role="radio" aria-checked="false">关键词</button>
+        </div>
+        <p class="hint" id="mode-hint"></p>
+
+        <div id="hybrid-controls">
+          <h3>融合策略</h3>
+          <div class="segmented" id="fusion-seg" role="radiogroup" aria-label="融合策略">
+            <button data-fusion="rrf" class="is-active" role="radio" aria-checked="true">seekdb 原生 RRF</button>
+            <button data-fusion="weighted" role="radio" aria-checked="false">可调权重</button>
+          </div>
+
+          <div class="field" id="weight-field" hidden>
+            <label for="weight">语义权重 <output id="weight-out">0.60</output></label>
+            <input id="weight" type="range" min="0" max="1" step="0.05" value="0.6">
+            <p class="hint">0 = 只看关键词命中，1 = 只看语义相近</p>
+          </div>
+
+          <div class="field" id="rc-field">
+            <label for="rank-constant">RRF rank_constant <output id="rc-out">60</output></label>
+            <input id="rank-constant" type="range" min="1" max="200" step="1" value="60">
+            <p class="hint">值越大，两路排名的差异被压得越平</p>
+          </div>
+        </div>
+
+        <h3>结果数量</h3>
+        <div class="field">
+          <label for="topk">top_k <output id="topk-out">8</output></label>
+          <input id="topk" type="range" min="1" max="30" step="1" value="8">
+        </div>
+
+        <h3>结构化过滤</h3>
+        <div class="checks" id="kind-checks">
+          <label><input type="checkbox" value="paper"> 论文</label>
+          <label><input type="checkbox" value="note"> 笔记</label>
+          <label><input type="checkbox" value="record"> 实验记录</label>
+        </div>
+        <div class="checks" id="lang-checks">
+          <label><input type="checkbox" value="zh"> 中文</label>
+          <label><input type="checkbox" value="en"> 英文</label>
+        </div>
+        <p class="hint">过滤条件与向量、全文检索在同一条 SQL 里下推执行</p>
+
+        <div class="meta-box" id="last-meta"></div>
+      </aside>
+
+      <div class="results">
+        <div id="results-status" class="status"></div>
+        <ol id="results" class="result-list"></ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= 三路对比 ======================= -->
+  <section class="panel" id="panel-compare">
+    <div class="search-head">
+      <form id="compare-form" class="searchbar" autocomplete="off">
+        <input id="cq" type="search" placeholder="同一个问题，分别用纯语义 / 纯关键词 / 混合检索，看排名怎么变" aria-label="对比检索词">
+        <button type="submit" class="btn btn-primary">对比</button>
+      </form>
+      <p class="hint">这个面板用来直接看清混合检索改变了什么：哪些段落只有语义能找到、哪些只有关键词能命中。</p>
+    </div>
+    <div id="compare-status" class="status"></div>
+    <div id="compare-summary" class="compare-summary"></div>
+    <div class="table-wrap">
+      <table class="grid" id="compare-table">
+        <thead>
+          <tr>
+            <th>段落</th><th>出处</th>
+            <th class="num">语义排名</th><th class="num">关键词排名</th><th class="num">混合排名</th>
+            <th>召回来源</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ======================= 文档库 ======================= -->
+  <section class="panel" id="panel-library">
+    <div id="library-status" class="status"></div>
+    <div id="library-stats" class="stat-strip"></div>
+    <div class="table-wrap">
+      <table class="grid" id="library-table">
+        <thead>
+          <tr><th>标题</th><th>类型</th><th>语言</th><th class="num">分块</th><th class="num">字数</th><th>文件</th><th></th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ======================= 导入 ======================= -->
+  <section class="panel" id="panel-ingest">
+    <div class="ingest-head">
+      <div>
+        <h2>导入语料</h2>
+        <p class="hint">
+          扫描服务器上的语料目录，解析 PDF / Markdown / TXT / CSV，按标题层级与页面结构化分块，
+          向量化后写入 seekdb。每个分块都保留文件名、页码、章节路径与行号。
+        </p>
+      </div>
+      <div class="actions">
+        <button class="btn" id="btn-preview">刷新文件清单</button>
+        <button class="btn" id="btn-incremental">增量导入</button>
+        <button class="btn btn-primary" id="btn-rebuild">全量重建索引</button>
+      </div>
+    </div>
+    <div id="ingest-status" class="status"></div>
+    <div class="table-wrap">
+      <table class="grid" id="preview-table">
+        <thead><tr><th>文件</th><th>类型</th><th class="num">大小</th><th>状态</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="ingest-report" class="report"></div>
+  </section>
+
+  <!-- ======================= 运行环境 ======================= -->
+  <section class="panel" id="panel-about">
+    <div id="about-status" class="status"></div>
+    <div class="about-grid">
+      <article class="card">
+        <h3>seekdb 实例</h3>
+        <dl id="about-seekdb" class="kv"></dl>
+      </article>
+      <article class="card">
+        <h3>向量化后端</h3>
+        <dl id="about-embedder" class="kv"></dl>
+      </article>
+      <article class="card">
+        <h3>语料规模</h3>
+        <dl id="about-corpus" class="kv"></dl>
+      </article>
+      <article class="card card-wide">
+        <h3>chunk 表真实结构 <span class="tag">SHOW CREATE TABLE</span></h3>
+        <p class="hint">同一张表上同时挂着 VECTOR 索引（cosine + HNSW）、FULLTEXT 索引（ik 中文分词）与普通标量列，三路检索在一条 SQL 内下推。</p>
+        <pre class="code" id="about-ddl"></pre>
+      </article>
+      <article class="card card-wide">
+        <h3>最近检索记录 <span class="tag">search_log 表</span></h3>
+        <div class="table-wrap">
+          <table class="grid" id="log-table">
+            <thead><tr><th>时间</th><th>检索词</th><th>模式</th><th>融合</th><th class="num">结果</th><th class="num">耗时 ms</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </article>
+    </div>
+  </section>
+</main>
+
+<!-- SQL 抽屉 -->
+<div class="drawer" id="drawer" hidden>
+  <div class="drawer-head">
+    <strong id="drawer-title">本次检索实际执行的 SQL</strong>
+    <button class="btn btn-ghost" id="drawer-close" aria-label="关闭">✕</button>
+  </div>
+  <div class="drawer-body">
+    <p class="hint" id="drawer-note"></p>
+    <pre class="code" id="drawer-sql"></pre>
+    <div id="drawer-extra"></div>
+  </div>
+</div>
+<div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+
+<!-- 相关段落弹层 -->
+<div class="modal" id="modal" hidden>
+  <div class="modal-head">
+    <strong id="modal-title">相关段落</strong>
+    <button class="btn btn-ghost" id="modal-close" aria-label="关闭">✕</button>
+  </div>
+  <div class="modal-body" id="modal-body"></div>
+</div>
+<div class="modal-backdrop" id="modal-backdrop" hidden></div>
+
+<footer class="foot">
+  <span>溯文 SeekLit · 数据存储与检索由 <a href="https://github.com/oceanbase/seekdb" rel="noopener">OceanBase seekdb</a> 提供</span>
+  <span id="foot-time"></span>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

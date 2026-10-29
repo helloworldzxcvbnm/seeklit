@@ -1,0 +1,143 @@
+
+══════════════════════════════════════════════════════════════════════════════
+  GET /api/health   (http://127.0.0.1:18090)
+══════════════════════════════════════════════════════════════════════════════
+  [PASS] health 200 — 115 ms
+  [PASS] seekdb_reachable — 5.7.25-OceanBase seekdb-v1.4.0.0
+  [PASS] corpus 非空 — 26 docs / 508 chunks
+  [PASS] chunk_table_ddl 含 VECTOR 索引
+  [PASS] chunk_table_ddl 含 FULLTEXT 索引 — 期望 3 个：ft_content / ft_section / ft_chunk
+
+══════════════════════════════════════════════════════════════════════════════
+  GET /api/stats
+══════════════════════════════════════════════════════════════════════════════
+  [PASS] stats 200 — 69 ms
+    {"corpus": {"docs": 26, "chunks": 508, "chars": 271656, "by_kind": [{"doc_kind": "note", "docs": 19, "chunks": "161"}, {"doc_kind": "record", "docs": 5, "chunks": "59"}, {"doc_kind": "paper", "docs": 2, "chunks": "288"}], "by_lang": [{"lang": "zh", "chunks": 166}, {"lang": "en", "chunks": 342}]}, "chunk_table_ddl": "CREATE TABLE `chunk` (\n  `chunk_id` bigint(20) NOT NULL,\n  `doc_id` varchar(64) NOT NULL,\n  `doc_title` varchar(512) DEFAULT NULL,\n  `doc_kind` varchar(32) DEFAULT NULL,\n  `sour
+
+══════════════════════════════════════════════════════════════════════════════
+  GET /api/docs（接口清单）
+══════════════════════════════════════════════════════════════════════════════
+  [PASS] docs 200 — 73 ms
+  [PASS] 端点数 > 8 — 14 条
+    runtime: python 3.10.18 · http.server (stdlib, 0 web deps)
+      GET     /api/health                               健康检查：seekdb 版本、生效配置、语料规模、chunk 表 DDL
+      GET     /api/stats                         [auth] 语料规模与 chunk 表结构
+      POST    /api/search                        [auth] 执行一次检索，返回结果 + 真实 SQL + 分数分解 + 耗时
+      POST    /api/compare                       [auth] 三路对比：纯语义 / 纯关键词 / seekdb 原生混合，返回排名差异
+      GET     /api/chunks/{chunk_id}             [auth] 回表取一个分块的完整原文与出处元数据
+      GET     /api/chunks/{chunk_id}/related     [auth] 以段找段：用该分块已存储的向量在 VECTOR 索引上做近邻检索
+      GET     /api/logs                          [auth] 读取 search_log 表里最近的检索记录
+      GET     /api/preset-queries                       语料里挑出的真实问题，供演示与效果验证复用
+      GET     /api/documents                     [auth] 列出 doc 表里的全部文档
+      DELETE  /api/documents/{doc_id}            [auth] 从 seekdb 删除一篇文档及其所有分块
+      GET     /api/ingest/preview                [auth] 扫描语料目录，标注哪些文件已导入
+      POST    /api/ingest                        [auth] 导入语料：mode=rebuild 全量重建 / incremental 增量
+      POST    /api/snapshot/export               [auth] 导出检索结果快照 JSON，供公开站点离线演示（分数全部来自真实 seekdb 
+      GET     /api/docs                                 本服务的接口清单
+
+══════════════════════════════════════════════════════════════════════════════
+  GET /api/preset-queries
+══════════════════════════════════════════════════════════════════════════════
+  [PASS] preset-queries 200 — 132 ms
+  [PASS] 预设问题非空 — 8 条
+
+══════════════════════════════════════════════════════════════════════════════
+  GET /api/documents
+══════════════════════════════════════════════════════════════════════════════
+  [PASS] documents 200 — 87 ms
+  [PASS] 文档数 = 26 — 实际 26
+
+══════════════════════════════════════════════════════════════════════════════
+  POST /api/search —— 四条执行路径
+══════════════════════════════════════════════════════════════════════════════
+  [PASS] search semantic — execution=semantic n=5 db=53.062ms wall=125ms err=None
+        真实执行 SQL 1 条，首条前 160 字符：
+        SELECT chunk_id,doc_id,doc_title,doc_kind,source_path,lang,page_no,section_path,line_start,line_end,tags,content, cosine_distance(`emb`, '[0.04847667,0.40445581…
+  [PASS] search keyword — execution=keyword n=5 db=178.188ms wall=268ms err=None
+        真实执行 SQL 1 条，首条前 160 字符：
+        SELECT chunk_id,doc_id,doc_title,doc_kind,source_path,lang,page_no,section_path,line_start,line_end,tags,content, MATCH(`content`,`section_path`) AGAINST(%s IN …
+  [PASS] search hybrid/rrf — execution=hybrid/native-rrf n=5 db=203.988ms wall=296ms err=None
+        真实执行 SQL 1 条，首条前 160 字符：
+        SELECT ifnull(`_fts`.`chunk_id`, `_vs`.`chunk_id`) as `chunk_id`, ifnull(`_fts`.`doc_id`, `_vs`.`doc_id`) as `doc_id`, ifnull(`_fts`.`doc_title`, `_vs`.`doc_tit…
+  [PASS] search hybrid/weighted — execution=hybrid/weighted-single-sql n=5 db=43.956ms wall=112ms err=None
+        真实执行 SQL 1 条，首条前 160 字符：
+        WITH `v` AS (
+  SELECT `chunk_id`, (1 - cosine_distance(`emb`, '[0.04847667,0.40445581,-0.00423856,0.01821722,0.02191090,-0.01664348,0.00622679,-0.00142167,0.00…
+
+══════════════════════════════════════════════════════════════════════════════
+  POST /api/search —— 结构化过滤下推
+══════════════════════════════════════════════════════════════════════════════
+  [PASS] filter doc_kind=paper — n=8 kinds=['paper'] 150ms
+  [PASS] filter doc_kind=note — n=8 kinds=['note'] 108ms
+  [PASS] filter doc_kind=record — n=8 kinds=['record'] 82ms
+  [PASS] filter lang=en — n=8
+
+══════════════════════════════════════════════════════════════════════════════
+  POST /api/search —— 参数校验
+══════════════════════════════════════════════════════════════════════════════
+  [PASS] 空查询被拒绝 — status=400 detail={'detail': '检索词不能为空'}
+  [PASS] 非法 mode 返回 400 而不是 500 — status=400 {'detail': 'mode 只能是 semantic/keyword/hybrid'}
+
+══════════════════════════════════════════════════════════════════════════════
+  POST /api/compare —— 三路对比
+══════════════════════════════════════════════════════════════════════════════
+  [PASS] compare 200 且有行 — 233 ms rows=11
+    agreement: {"semantic_and_keyword": 5, "only_semantic": 3, "only_keyword": 3, "hybrid_vs_semantic_overlap": 5, "hybrid_vs_keyword_overlap": 8}
+    semantic   elapsed=13.415ms ids=[126, 151, 490, 131, 23, 125, 472, 49]
+    keyword    elapsed=8.089ms ids=[49, 125, 151, 131, 132, 154, 126, 120]
+    hybrid     elapsed=173.283ms ids=[151, 125, 131, 49, 126, 120, 132, 154]
+
+══════════════════════════════════════════════════════════════════════════════
+  GET /api/chunks/{id} + /related
+══════════════════════════════════════════════════════════════════════════════
+  [PASS] 拿到一个 chunk_id — chunk_id=126
+  [PASS] GET /api/chunks/126 — 65 ms
+  [PASS] GET /api/chunks/126/related — n=5 70 ms
+  [PASS] 不存在的 chunk 返回 404 — status=404
+
+══════════════════════════════════════════════════════════════════════════════
+  GET /api/logs
+══════════════════════════════════════════════════════════════════════════════
+  [PASS] logs 200 — 57 ms n=5
+    [2026-10-30 01:04:13] semantic/None n=1 6.451ms 持续小幅慢漂移用哪种方法在线检测
+    [2026-10-30 01:04:12] hybrid/rrf n=8 130.468ms 持续小幅慢漂移用哪种方法在线检测
+    [2026-10-30 01:04:12] hybrid/rrf n=8 39.322ms 持续小幅慢漂移用哪种方法在线检测
+  [PASS] 日志里的中文没被编码破坏
+
+══════════════════════════════════════════════════════════════════════════════
+  GET /api/ingest/preview
+══════════════════════════════════════════════════════════════════════════════
+  [PASS] ingest preview 200 — 45 ms
+    {"corpus_dir": "/root/ryh/newproject/corpus_raw"}
+    files: 26 个
+
+══════════════════════════════════════════════════════════════════════════════
+  静态资源
+══════════════════════════════════════════════════════════════════════════════
+  [PASS] GET / — status=200 (期望 200) 9 ms
+  [PASS] GET /app.js — status=200 (期望 200) 17 ms
+  [PASS] GET /style.css — status=200 (期望 200) 19 ms
+  [PASS] GET /favicon.svg — status=200 (期望 200) 97 ms
+  [PASS] GET /nope.js — status=404 (期望 404) 96 ms
+  [PASS] 目录穿越被拦截 /../app/config.py — status=403 97 ms
+  [PASS] 目录穿越被拦截 /..%2fapp%2fconfig.py — status=403 108 ms
+  [PASS] 目录穿越被拦截 /static/../../app/db.py — status=403 98 ms
+
+══════════════════════════════════════════════════════════════════════════════
+  全部预设问题走一遍混合检索（HTTP 端到端）
+══════════════════════════════════════════════════════════════════════════════
+  [PASS] 「持续小幅慢漂移用哪种方法在线检测」 — n=8 db=187.929ms wall=258ms top=规则汇总 · 一、任务界定
+  [PASS] 「CUSUM 的 k 和 h 怎么标定」 — n=8 db=233.964ms wall=326ms top=M04
+  [PASS] 「单点毛刺应该用哪个方法」 — n=8 db=144.278ms wall=207ms top=规则汇总 · 一、任务界定
+  [PASS] 「报警拖尾导致误判故障仍在持续」 — n=8 db=168.249ms wall=202ms top=method_overview
+  [PASS] 「AGC 上升 RSL 下降属于哪一类异常」 — n=8 db=288.669ms wall=374ms top=卫星通信系统异常 · 适合规则检测
+  [PASS] 「哪些方法对持续电平型故障结构性失明」 — n=8 db=177.68ms wall=245ms top=M05
+  [PASS] 「误报预算怎么用蒙特卡洛重新标定」 — n=8 db=143.421ms wall=222ms top=M07 · "双窗"是哪两个窗
+  [PASS] 「unsupervised anomaly d」 — n=8 db=225.604ms wall=302ms top=Spacecraft-anomaly-detecti
+
+  平均：seekdb 侧 196.2 ms，HTTP 端到端 267.1 ms
+
+══════════════════════════════════════════════════════════════════════════════
+  结果
+══════════════════════════════════════════════════════════════════════════════
+  PASS 46   FAIL 0

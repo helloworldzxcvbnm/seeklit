@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+data/*.npz
+data/*.pt
+data/lsa_model.*
+runtime/
+logs/serve.log
+logs/seekdb.log
+logs/*.pid
+*.pid
+.DS_Store
+corpus_raw/

@@ -1,0 +1,35 @@
+# 溯文 SeekLit —— 运行期依赖
+#
+# 刻意保持极简：整个 Web 层用 Python 标准库 http.server 实现，
+# 因此除下面两项之外没有任何必装依赖。
+# 部署机实测出网带宽只有 15–25 KB/s，FastAPI 的依赖树
+# （starlette / pydantic-core / opentelemetry-api / annotated-doc …）
+# 在这种带宽下反复读超时，装不上。零 Web 依赖是有意为之的工程选择。
+#
+# 安装：  pip install -r requirements.txt
+
+# MySQL 协议客户端，用于连接 seekdb（seekdb 兼容 MySQL 协议）
+pymysql>=1.1
+
+# PDF 文本抽取。项目里 pypdf 是 pdfplumber 的回退实现，
+# 带宽受限时只装 pypdf 也完全够用。
+pypdf>=4.0
+
+# ---- 可选 ----
+# 更好的 PDF 版面/表格抽取（会额外拉 pdfminer.six、Pillow，约 8 MB）
+# pdfplumber>=0.11
+
+# 中文分词。缺失时 embedder 自动回退到 CJK 二元组分词，功能不受影响，
+# 只是 LSA 的词表粒度略粗（约 19 MB）
+# jieba>=0.42
+
+# 数值计算。多数科学计算环境已自带；LSA 的随机化截断 SVD 只用到它。
+# numpy>=1.24
+
+# ---- 可选：把向量化后端换成神经嵌入模型 ----
+# 默认后端是离线 LSA（TF-IDF + 随机化截断 SVD，纯 numpy，不需要联网下模型）。
+# 如果机器上已经跑了 Ollama / vLLM / TEI 之类的嵌入服务，改一个环境变量即可切换：
+#   EMBED_BACKEND=ollama   OLLAMA_EMBED_MODEL=bge-m3
+#   EMBED_BACKEND=openai   OPENAI_EMBED_BASE_URL=... OPENAI_EMBED_MODEL=...
+#   EMBED_BACKEND=sbert    SBERT_MODEL=BAAI/bge-m3
+# 这些后端都用标准库 urllib 发请求，同样不需要额外装包。

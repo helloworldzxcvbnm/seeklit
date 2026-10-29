@@ -1,0 +1,257 @@
+
+══════════════════════════════════════════════════════════════════════════════
+  0. 运行环境
+══════════════════════════════════════════════════════════════════════════════
+  seekdb 版本        : 5.7.25-OceanBase seekdb-v1.4.0.0
+  采集时间           : 2026-10-30 00:34:00
+  连接              : 127.0.0.1:10100/seeklit  user=root@sys
+  语料              : 26 篇文档 / 508 段 / 271,656 字符
+  向量化            : lsa  dim=256
+
+══════════════════════════════════════════════════════════════════════════════
+  1. chunk 表真实结构（SHOW CREATE TABLE）
+══════════════════════════════════════════════════════════════════════════════
+  CREATE TABLE `chunk` (
+    `chunk_id` bigint(20) NOT NULL,
+    `doc_id` varchar(64) NOT NULL,
+    `doc_title` varchar(512) DEFAULT NULL,
+    `doc_kind` varchar(32) DEFAULT NULL,
+    `source_path` varchar(1024) DEFAULT NULL,
+    `lang` varchar(8) DEFAULT NULL,
+    `page_no` int(11) DEFAULT NULL,
+    `section_path` varchar(1024) DEFAULT NULL,
+    `line_start` int(11) DEFAULT NULL,
+    `line_end` int(11) DEFAULT NULL,
+    `chunk_index` int(11) DEFAULT NULL,
+    `tags` varchar(512) DEFAULT NULL,
+    `content` text DEFAULT NULL,
+    `content_hash` char(32) DEFAULT NULL,
+    `emb` VECTOR(256) DEFAULT NULL,
+    `created_at` datetime DEFAULT NULL,
+    KEY `idx_chunk_id` (`chunk_id`) BLOCK_SIZE 16384 LOCAL,
+    KEY `idx_doc_id` (`doc_id`) BLOCK_SIZE 16384 LOCAL,
+    KEY `idx_doc_kind` (`doc_kind`) BLOCK_SIZE 16384 LOCAL,
+    FULLTEXT KEY `ft_chunk` (`content`, `section_path`) WITH PARSER ik PARSER_PROPERTIES=(ik_mode="smart") BLOCK_SIZE 16384,
+    VECTOR KEY `v_chunk_emb` (`emb`) WITH (DISTANCE=COSINE, TYPE=HNSW, LIB=VSAG, M=16, EF_CONSTRUCTION=200, EF_SEARCH=64) BLOCK_SIZE 16384,
+    FULLTEXT KEY `ft_content` (`content`) WITH PARSER ik PARSER_PROPERTIES=(ik_mode="smart") BLOCK_SIZE 16384,
+    FULLTEXT KEY `ft_section` (`section_path`) WITH PARSER ik PARSER_PROPERTIES=(ik_mode="smart") BLOCK_SIZE 16384
+  ) ORGANIZATION INDEX DEFAULT CHARSET = utf8mb4 ROW_FORMAT = DYNAMIC COMPRESSION = 'zstd_1.3.8' BLOCK_SIZE = 16384 TABLET_SIZE = 134217728 PCTFREE = 0
+
+══════════════════════════════════════════════════════════════════════════════
+  2. 索引清单
+══════════════════════════════════════════════════════════════════════════════
+  idx_chunk_id   seq=1 col=chunk_id       type=BTREE
+  idx_doc_id     seq=1 col=doc_id         type=BTREE
+  idx_doc_kind   seq=1 col=doc_kind       type=BTREE
+  ft_chunk       seq=1 col=content        type=FULLTEXT
+  ft_chunk       seq=2 col=section_path   type=FULLTEXT
+  v_chunk_emb    seq=1 col=emb            type=VECTOR
+  ft_content     seq=1 col=content        type=FULLTEXT
+  ft_section     seq=1 col=section_path   type=FULLTEXT
+
+
+══════════════════════════════════════════════════════════════════════════════
+  3. 四条路径逐一验证 —— 问题：持续小幅慢漂移用哪种方法在线检测
+══════════════════════════════════════════════════════════════════════════════
+
+──────────────────────────────────────────────────────────────────────────────
+  3.1 semantic —— VECTOR 索引 + cosine + ORDER BY ... APPROXIMATE
+──────────────────────────────────────────────────────────────────────────────
+  execution=semantic  elapsed=9.255 ms  n=5
+  --- SQL #1 ---
+    SELECT chunk_id,doc_id,doc_title,doc_kind,source_path,lang,page_no,section_path,line_start,line_end,tags,content, cosine_distance(`emb`, '[0.04847667,0.40445581,-0.00423856,0.01821722,0.02191090,-0.01664348,0.00622679,-0.00142167,0.00029979,-0.02847997,-0.03560242,-0.01130772,0.13647318,0.06936891,0.06542269,-0.06877937,0.05359006,0.01414269,0.02800675,0.00550020,0.03225376,0.06874578,0.06341617,-0.19411674, … 共 256 维]) AS vec_dist FROM `chunk` WHERE 1=1 ORDER BY vec_dist APPROXIMATE LIMIT 5
+  #1 [note] 一、任务界定 | 二、逐方法汇总： > [M04 Page–Hinkl | vec=0.421329
+  #2 [note] 一、任务界定 | 三、各方法伪代码 > 3.4 M04 Page–Hi | vec=0.409971
+  #3 [record] ﻿method_id / method_name_cn  | 数据表 行 22-24 | vec=0.379771
+  #4 [note] 一、任务界定 | 二、逐方法汇总： > [M08 在线多尺度 MOSU | vec=0.356263
+  #5 [note] SPOT 基本原理 |  | vec=0.341113
+
+──────────────────────────────────────────────────────────────────────────────
+  3.2 keyword —— FULLTEXT 索引（ik 分词）+ MATCH ... AGAINST → BM25
+──────────────────────────────────────────────────────────────────────────────
+  execution=keyword  elapsed=178.154 ms  n=5
+  --- SQL #1 ---
+    SELECT chunk_id,doc_id,doc_title,doc_kind,source_path,lang,page_no,section_path,line_start,line_end,tags,content, MATCH(`content`,`section_path`) AGAINST(%s IN NATURAL LANGUAGE MODE) AS bm25 FROM `chunk` WHERE MATCH(`content`,`section_path`) AGAINST(%s IN NATURAL LANGUAGE MODE) ORDER BY bm25 DESC LIMIT 5
+  #1 [note] 一、任务界定 | 二、逐方法汇总： > [M08 在线多尺度 MOSU | bm25=3.874648
+  #2 [note] SPOT 基本原理 |  | bm25=3.174471
+  #3 [note] 一、任务界定 | 三、各方法伪代码 > 3.8 M08 在线多尺度 M | bm25=2.476711
+  #4 [note] 一、任务界定 | 三、各方法伪代码 > 3.4 M04 Page–Hi | bm25=2.4459
+  #5 [note] 一、姿态感知异常 | 小结 | bm25=2.413005
+
+──────────────────────────────────────────────────────────────────────────────
+  3.3 hybrid/rrf —— dbms_hybrid_search.search()，数据库内部完成融合
+──────────────────────────────────────────────────────────────────────────────
+  execution=hybrid/native-rrf  elapsed=130.538 ms  n=5
+  --- 应用侧提交的 DSL ---
+    {
+      "query": {
+        "multi_match": {
+          "query": "持续小幅慢漂移用哪种方法在线检测",
+          "fields": [
+            "content",
+            "section_path"
+          ]
+        }
+      },
+      "knn": {
+        "field": "emb",
+        "query_vector": "<256 维向量，已省略>",
+        "k": 60
+      },
+      "rank": {
+        "rrf": {
+          "rank_constant": 60,
+          "rank_window_size": 60
+        }
+      },
+      "size": 5,
+      "_source": [
+        "chunk_id",
+        "doc_id",
+        "doc_title",
+        "doc_kind",
+        "source_path",
+        "lang",
+        "page_no",
+        "section_path",
+        "line_start",
+        "line_end",
+        "tags",
+        "content"
+      ]
+    }
+  --- 下面是 seekdb 自己生成的 SQL（dbms_hybrid_search.get_sql）---
+  --- SQL #1 ---
+    SELECT ifnull(`_fts`.`chunk_id`, `_vs`.`chunk_id`) as `chunk_id`, ifnull(`_fts`.`doc_id`, `_vs`.`doc_id`) as `doc_id`, ifnull(`_fts`.`doc_title`, `_vs`.`doc_title`) as `doc_title`, ifnull(`_fts`.`doc_kind`, `_vs`.`doc_kind`) as `doc_kind`, ifnull(`_fts`.`source_path`, `_vs`.`source_path`) as `source_path`, ifnull(`_fts`.`lang`, `_vs`.`lang`) as `lang`, ifnull(`_fts`.`page_no`, `_vs`.`page_no`) as `page_no`, ifnull(`_fts`.`section_path`, `_vs`.`section_path`) as `section_path`, ifnull(`_fts`.`line_start`, `_vs`.`line_start`) as `line_start`, ifnull(`_fts`.`line_end`, `_vs`.`line_end`) as `line_end`, ifnull(`_fts`.`tags`, `_vs`.`tags`) as `tags`, ifnull(`_fts`.`content`, `_vs`.`content`) as `content`, (ifnull(1 / (`_fts`.`_keyword_rank` + 60), 0) + ifnull(1 / (`_vs`.`_semantic_rank` + 60), 0)) as `_score` FROM ((SELECT *, RANK() over( ORDER BY `_keyword_score` DESC) as `_keyword_rank` FROM (SELECT /*+ opt_param('hidden_column_visible', 'true') */`__pk_increment`, `chunk_id`, `doc_id`, `doc_title`, `doc_kind`, `source_path`, `lang`, `page_no`, `section_path`, `line_start`, `line_end`, `tags`, `content`, GREATEST(match(`content`) against('持续小幅慢漂移用哪种方法在线检测' in natural language mode), match(`section_path`) against('持续小幅慢漂移用哪种方法在线检测' in natural language mode)) as `_keyword_score` FROM `seeklit`.`chunk` WHERE match(`content`) against('持续小幅慢漂移用哪种方法在线检测' in natural language mode) OR match(`section_path`) against('持续小幅慢漂移用哪种方法在线检测' in natural language mode) ORDER BY `_keyword_score` DESC LIMIT 1200)) `_fts` full join (SELECT *, RANK() over( ORDER BY `_semantic_score` DESC) as `_semantic_rank` FROM (SELECT /*+ opt_param('hidden_column_visible', 'true') */cosine_distance(`emb`, '[0.04847667,0.40445581,-0.00423856,0.01821722,0.0219109,-0.01664348,0.00622679,-0.00142167,0.00029979,-0.02847997,-0.03560242,-0.01130772,0.13647318,0.06936891,0.06542269,-0.06877937,0.05359006,0.01414269,0.02800675,0.0055002,0.03225376,0.06874578,0.06341617,-0.19411674, … 共 256 维]) as `_distance`, `__pk_increment`, `chunk_id`, `doc_id`, `doc_title`, `doc_kind`, `source_path`, `lang`, `page_no`, `section_path`, `line_start`, `line_end`, `tags`, `content`, round(1 - cosine_distance(`emb`, '[0.04847667,0.40445581,-0.00423856,0.01821722,0.0219109,-0.01664348,0.00622679,-0.00142167,0.00029979,-0.02847997,-0.03560242,-0.01130772,0.13647318,0.06936891,0.06542269,-0.06877937,0.05359006,0.01414269,0.02800675,0.0055002,0.03225376,0.06874578,0.06341617,-0.19411674, … 共 256 维]) / 2, 8) as `_semantic_score` FROM `seeklit`.`chunk` ORDER BY `_distance` APPROXIMATE LIMIT 60)) `_vs` on `_fts`.`__pk_increment` = `_vs`.`__pk_increment`) ORDER BY `_score` DESC, ifnull(`_vs`.`__pk_increment`, `_fts`.`__pk_increment`) LIMIT 5
+  #1 [note] 一、任务界定 | 三、各方法伪代码 > 3.4 M04 Page–Hi | fused=0.032
+  #2 [note] 一、任务界定 | 二、逐方法汇总： > [M03 双侧 CUSUM（冻 | fused=0.0313
+  #3 [note] 一、任务界定 | 二、逐方法汇总： > [M08 在线多尺度 MOSU | fused=0.0313
+  #4 [note] 范式：从"检验"到"约束估计" | 理论最优性：极小极大分离距离 | fused=0.0311
+  #5 [note] 一、任务界定 | 二、逐方法汇总： > [M04 Page–Hinkl | fused=0.0305
+
+──────────────────────────────────────────────────────────────────────────────
+  3.4 hybrid/weighted —— 单条 SQL 内两路召回 + 归一化 + 加权
+──────────────────────────────────────────────────────────────────────────────
+  w=0.2: execution=hybrid/weighted-single-sql elapsed=39.768 ms n=5 err=None
+  w=0.6: execution=hybrid/weighted-single-sql elapsed=4.497 ms n=5 err=None
+  --- SQL #1 ---
+    WITH `v` AS (
+      SELECT `chunk_id`, (1 - cosine_distance(`emb`, '[0.04847667,0.40445581,-0.00423856,0.01821722,0.02191090,-0.01664348,0.00622679,-0.00142167,0.00029979,-0.02847997,-0.03560242,-0.01130772,0.13647318,0.06936891,0.06542269,-0.06877937,0.05359006,0.01414269,0.02800675,0.00550020,0.03225376,0.06874578,0.06341617,-0.19411674, … 共 256 维])) AS vsim
+      FROM `chunk` WHERE 1=1
+      ORDER BY cosine_distance(`emb`, '[0.04847667,0.40445581,-0.00423856,0.01821722,0.02191090,-0.01664348,0.00622679,-0.00142167,0.00029979,-0.02847997,-0.03560242,-0.01130772,0.13647318,0.06936891,0.06542269,-0.06877937,0.05359006,0.01414269,0.02800675,0.00550020,0.03225376,0.06874578,0.06341617,-0.19411674, … 共 256 维]) APPROXIMATE LIMIT 60
+    ),
+    `f` AS (
+      SELECT `chunk_id`, MATCH(`content`,`section_path`) AGAINST(%s IN NATURAL LANGUAGE MODE) AS bm25
+      FROM `chunk` WHERE MATCH(`content`,`section_path`) AGAINST(%s IN NATURAL LANGUAGE MODE)
+      ORDER BY bm25 DESC LIMIT 60
+    ),
+    `vn` AS (
+      SELECT `chunk_id`, vsim, MAX(vsim) OVER () AS vmax,
+             ROW_NUMBER() OVER (ORDER BY vsim DESC) AS vrank
+      FROM `v`
+    ),
+    `fn` AS (
+      SELECT `chunk_id`, bm25, MAX(bm25) OVER () AS fmax,
+             ROW_NUMBER() OVER (ORDER BY bm25 DESC) AS frank
+      FROM `f`
+    )
+    SELECT c.chunk_id, c.doc_id, c.doc_title, c.doc_kind, c.source_path, c.lang,
+           c.page_no, c.section_path, c.line_start, c.line_end, c.tags, c.content,
+           vn.vsim AS vec_raw, vn.vrank AS vec_rank,
+           fn.bm25 AS bm25_raw, fn.frank AS bm25_rank,
+           ROUND(COALESCE(vn.vsim / NULLIF(vn.vmax,0), 0), 6) AS vec_score,
+           ROUND(COALESCE(fn.bm25 / NULLIF(fn.fmax,0), 0), 6) AS bm25,
+           ROUND(0.6 * COALESCE(vn.vsim / NULLIF(vn.vmax,0), 0)
+               + 0.4 * COALESCE(fn.bm25 / NULLIF(fn.fmax,0), 0), 6) AS fused
+    FROM `vn`
+    FULL JOIN `fn` ON vn.chunk_id = fn.chunk_id
+    JOIN `chunk` c ON c.chunk_id = COALESCE(vn.chunk_id, fn.chunk_id)
+    ORDER BY fused DESC, vec_rank ASC
+    LIMIT 5
+  #1 [note] 一、任务界定 | 二、逐方法汇总： > [M08 在线多尺度 MOSU | fused=0.907342 vec=0.84557 bm25=1.0
+  #2 [note] 一、任务界定 | 三、各方法伪代码 > 3.4 M04 Page–Hi | fused=0.836329 vec=0.973043 bm25=0.631257
+  #3 [note] SPOT 基本原理 |  | fused=0.813485 vec=0.809613 bm25=0.819293
+  #4 [note] 一、任务界定 | 二、逐方法汇总： > [M04 Page–Hinkl | fused=0.792292 vec=1.0 bm25=0.48073
+  #5 [record] ﻿method_id / method_name_cn  | 数据表 行 22-24 | fused=0.707245 vec=0.901365 bm25=0.416066
+  w=0.9: execution=hybrid/weighted-single-sql elapsed=10.107 ms n=5 err=None
+
+──────────────────────────────────────────────────────────────────────────────
+  3.5 结构化过滤 —— 向量 + 全文 + 标量在同一个执行计划里下推
+──────────────────────────────────────────────────────────────────────────────
+  无过滤              : n=8
+  doc_kind=['paper'] : n=8 elapsed=110.961 ms
+  doc_kind=['note']  : n=8 elapsed=93.138 ms
+  doc_kind=['record']: n=8 elapsed=50.723 ms
+  lang=['en']         : n=8
+  --- 过滤下推体现在 DSL 的 filter 子句里 ---
+    {"query": {"bool": {"must": [{"multi_match": {"query": "持续小幅慢漂移用哪种方法在线检测", "fields": ["content", "section_path"]}}], "filter": [{"terms": {"lang": ["en"]}}]}}, "knn": {"field": "emb", "query_vector": [0.04847667, 0.40445581, -0.00423856, 0.01821722, 0.0219109, -0.01664348, 0.00622679, -0.00142167, 0.00029979, -0.02847997, -0.03560242, -0.01130772, 0.13647318, 0.06936891, 0.06542269, -0.06877937, 0.05359006, 0.01414269, 0.02800675, 0.0055002, 0.03225376, 0.06874578, 0.06341617, -0.19411674, 0.10489255, 0.00339341, 0.03357224, -0.01933168, -0.12981434, -0.02552815, 0.04508855, 0.0606537, 0.15121
+
+══════════════════════════════════════════════════════════════════════════════
+  4. compare_modes —— 三路排名差异
+══════════════════════════════════════════════════════════════════════════════
+  agreement: {"semantic_and_keyword": 4, "only_semantic": 4, "only_keyword": 4, "hybrid_vs_semantic_overlap": 5, "hybrid_vs_keyword_overlap": 4}
+
+      语义    关键词     混合  覆盖             文档 / 段落
+       2      4      1  both           一、任务界定 / 三、各方法伪代码 > 3.4 M04 Pag
+       6      -      2  semantic_only  一、任务界定 / 二、逐方法汇总： > [M03 双侧 CUS
+       4      1      3  both           一、任务界定 / 二、逐方法汇总： > [M08 在线多尺度 
+       8      7      4  both           范式：从"检验"到"约束估计" / 理论最优性：极小极大分离距离
+       1      -      5  semantic_only  一、任务界定 / 二、逐方法汇总： > [M04 Page–H
+       -      -      6  none           一、任务界定 / 一、任务界定
+       -      -      7  none           一、任务界定 / 二、逐方法汇总： > [M08 在线多尺度 
+       -      3      8  keyword_only   一、任务界定 / 三、各方法伪代码 > 3.8 M08 在线多
+       3      -      -  semantic_only  ﻿method_id / method_ / 数据表 行 22-24
+       5      2      -  both           SPOT 基本原理 / 
+       7      -      -  semantic_only  ﻿method_id / name_cn / 数据表 行 4-4
+       -      5      -  keyword_only   一、姿态感知异常 / 小结
+       -      6      -  keyword_only   一、任务界定 / 二、逐方法汇总： > [G01 处置流水线（
+       -      8      -  keyword_only   Rules / 
+
+  --- 纯语义路径 SQL ---
+  --- SQL #1 ---
+    SELECT chunk_id,doc_id,doc_title,doc_kind,source_path,lang,page_no,section_path,line_start,line_end,tags,content, cosine_distance(`emb`, '[0.04847667,0.40445581,-0.00423856,0.01821722,0.02191090,-0.01664348,0.00622679,-0.00142167,0.00029979,-0.02847997,-0.03560242,-0.01130772,0.13647318,0.06936891,0.06542269,-0.06877937,0.05359006,0.01414269,0.02800675,0.00550020,0.03225376,0.06874578,0.06341617,-0.19411674, … 共 256 维]) AS vec_dist FROM `chunk` WHERE 1=1 ORDER BY vec_dist APPROXIMATE LIMIT 8
+  --- 纯关键词路径 SQL ---
+  --- SQL #1 ---
+    SELECT chunk_id,doc_id,doc_title,doc_kind,source_path,lang,page_no,section_path,line_start,line_end,tags,content, MATCH(`content`,`section_path`) AGAINST(%s IN NATURAL LANGUAGE MODE) AS bm25 FROM `chunk` WHERE MATCH(`content`,`section_path`) AGAINST(%s IN NATURAL LANGUAGE MODE) ORDER BY bm25 DESC LIMIT 8
+
+══════════════════════════════════════════════════════════════════════════════
+  5. related_chunks —— 复用向量索引做段落到段落近邻
+══════════════════════════════════════════════════════════════════════════════
+  源 chunk_id=151  →  5 个近邻
+  --- SQL #1 ---
+    SELECT chunk_id,doc_id,doc_title,doc_kind,source_path,lang,page_no,section_path,line_start,line_end,tags,content, cosine_distance(`emb`, '[0.0571991,0.247307,-0.0203621,-0.114677,0.0103741,-0.0291399,-0.0339707,-0.0115293,-0.0443951,0.00380873,-0.149988,-0.105611,-0.0355908,0.0752398,-0.00012677,-0.0956076,0.0289905,-0.0694812,-0.0305941,0.0266032,-0.0411444,0.0204373,0.00507018,-0.0637861, … 共 256 维]) AS vec_dist FROM `chunk` WHERE chunk_id <> %s ORDER BY vec_dist APPROXIMATE LIMIT 5
+  #1 vec_score=0.509738  [record] ﻿method_id / name_cn / n | 数据表 行 4-4
+  #2 vec_score=0.500575  [note] 一、任务界定 | 二、逐方法汇总： > [M04 Page–Hinkl
+  #3 vec_score=0.437277  [record] ﻿method_id / method_name | 数据表 行 22-24
+  #4 vec_score=0.406679  [note] 一、任务界定 | 三、各方法伪代码 > 3.5 M05 Hampel 
+  #5 vec_score=0.3826  [note] 一、任务界定 | 三、各方法伪代码 > 3.3 M03 双侧 CUSU
+
+══════════════════════════════════════════════════════════════════════════════
+  6. 全部预设问题 × 四条路径
+══════════════════════════════════════════════════════════════════════════════
+  问题                                      语义     关键词    原生RRF      加权
+  持续小幅慢漂移用哪种方法在线检测                     91.1m  109.2m   184.7m  107.6m   n=8/8/8/8
+  CUSUM 的 k 和 h 怎么标定                   88.5m   88.7m   201.6m   53.5m   n=8/8/8/8
+  单点毛刺应该用哪个方法                          50.4m   79.5m    88.5m   65.0m   n=8/8/8/8
+  报警拖尾导致误判故障仍在持续                       95.6m   84.4m   152.6m   62.3m   n=8/8/8/8
+  AGC 上升 RSL 下降属于哪一类异常                102.8m   93.8m   194.9m   99.9m   n=8/8/8/8
+  哪些方法对持续电平型故障结构性失明                   100.7m   95.5m   154.0m   62.0m   n=8/8/8/8
+  误报预算怎么用蒙特卡洛重新标定                     104.7m   96.7m   157.0m   62.9m   n=8/8/8/8
+  unsupervised anomaly detection …    118.6m  109.8m   197.5m   59.7m   n=8/8/8/8
+
+  seekdb 侧平均耗时（不含向量化）：
+    semantic       4.12 ms
+    keyword        3.70 ms
+    rrf          116.38 ms
+    weighted       9.90 ms
+
+══════════════════════════════════════════════════════════════════════════════
+  7. search_log —— 每次检索都留痕
+══════════════════════════════════════════════════════════════════════════════
+  最近 1 条：
+    [2026-10-30 00:28:35] hybrid/rrf n=5 107.376ms  ����С����Ư�������ַ������߼��
+  search_log 累计 1 条
+
+══════════════════════════════════════════════════════════════════════════════
+  采集完成，用时 6.6 s
+══════════════════════════════════════════════════════════════════════════════
