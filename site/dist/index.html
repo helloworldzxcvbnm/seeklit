@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>溯文 SeekLit —— 基于 OceanBase seekdb 的科研文献与笔记混合检索</title>
+<meta name="description" content="把论文、课程笔记、实验记录导入 seekdb，用 VECTOR + FULLTEXT + 标量过滤单表混合检索。Qoder × OceanBase 参赛作品，含离线可交互的真实检索快照。">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%2312283a'/><text x='16' y='22' font-size='17' text-anchor='middle' fill='%23e8dcc3' font-family='serif'>溯</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap top-in">
+    <div class="brand">
+      <span class="logo">溯</span>
+      <div>
+        <strong>溯文 SeekLit</strong>
+        <em>科研文献与笔记混合检索 · Qoder × OceanBase 参赛作品</em>
+      </div>
+    </div>
+    <nav class="topnav">
+      <a href="#intro">简介</a>
+      <a href="#problem">问题</a>
+      <a href="#features">功能</a>
+      <a href="#anatomy">技术解剖</a>
+      <a href="#shots">截图</a>
+      <a href="#demo">体验入口</a>
+      <a href="#evidence">验证</a>
+      <a href="#run">运行</a>
+      <a href="#devlog">Qoder 记录</a>
+      <a class="gh" href="https://github.com/helloworldzxcvbnm/seeklit" target="_blank" rel="noopener">GitHub 仓库</a>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap">
+    <p class="kicker">OceanBase seekdb v1.4.0.0 · 仅使用 seekdb · 零其他向量/全文引擎</p>
+    <h1>一张表挂三类索引，<br>把「措辞对不上」和「术语不能错」一次解决</h1>
+    <p class="lede">溯文 SeekLit 把论文、课程笔记、实验记录导入 seekdb，在<strong>同一张表、同一条 SQL</strong> 里
+      同时下推向量检索（cosine + HNSW）、全文检索（ik 分词 + BM25）与结构化过滤，
+      并用 seekdb 原生 <code>dbms_hybrid_search</code> 在数据库内部完成 RRF 融合。
+      本页内嵌一份<strong>真实查询结果快照</strong>：不连服务器，也能切换检索路径、拖权重滑块、改 RRF 常数，
+      每个分数都用快照记录的原始 vsim / bm25 在你的浏览器里重算。</p>
+    <div class="hero-cta">
+      <a class="btn primary" href="#demo">进入离线体验</a>
+      <a class="btn" href="https://github.com/helloworldzxcvbnm/seeklit" target="_blank" rel="noopener">代码仓库</a>
+      <a class="btn" href="#evidence">验证与效果数据</a>
+    </div>
+    <ul class="badges">
+      <li><b>26</b> 篇文档 / <b>508</b> 段 / <b>271,656</b> 字符</li>
+      <li><b>4</b> 条检索路径（semantic / keyword / 原生 RRF / 单 SQL 加权）</li>
+      <li>seekdb 侧平均 <b>4.1 ms</b>（语义）· <b>3.7 ms</b>（关键词）· <b>9.9 ms</b>（加权单 SQL）</li>
+      <li>HTTP 冒烟 <b>46 PASS / 0 FAIL</b></li>
+      <li>8 个真实问题平均 <b>3.0 段仅语义能找到</b>、<b>3.0 段仅关键词能命中</b></li>
+    </ul>
+  </div>
+</section>
+
+<main class="wrap">
+
+<section id="intro">
+  <h2>项目简介</h2>
+  <p>题目方向是「文献与资料检索」：把论文、课程笔记或实验记录导入 seekdb，按语义和关键词混合检索，
+     快速找到相关段落和出处。溯文 SeekLit 的答卷是一个端到端可复现的系统：
+     导入管线（pdf / md / txt / csv 分块与标题合成）→ 离线向量化（LSA，可切换 ollama / openai / sbert）→
+     seekdb 单表三索引 → 四路检索与三路对比 → 标准库 <code>http.server</code> 支撑的检索工作台 →
+     真实结果快照导出供静态站点离线交互。</p>
+  <p>工程上刻意做了两个「反潮流」的选择，都有实测理由：Web 层只用 Python 标准库
+     （部署机出网仅十几 KB/s，FastAPI 依赖树装不动）；向量化默认离线 LSA
+     （不联网下模型，256 维，词表 6,417，纯 numpy 的随机化截断 SVD）。
+     二者都不影响 seekdb 侧能力的展示，且让评审在任何机器上都能一键复现。</p>
+</section>
+
+<section id="problem">
+  <h2>解决的问题</h2>
+  <p>科研资料检索的难点是两类失败同时存在，而任何单一路径都只能防住一类：</p>
+  <div class="cards three">
+    <article>
+      <h3>措辞对不上 → 字面检索失明</h3>
+      <p>问「持续小幅慢漂移用哪种方法在线检测」，正文术语是 <b>CUSUM / EWMA</b>，
+         全文索引里没有「在线检测」这个词组可命中；只有向量能跨措辞召回。</p>
+    </article>
+    <article>
+      <h3>术语不能错 → 向量检索漏召回</h3>
+      <p>问「CUSUM 的 k 和 h 怎么标定」，<code>k</code>、<code>h</code>、<code>ARL</code> 是精确词元，
+         语义相近但参数不同的段落会挤掉真正讲标定的那一段；只有 BM25 能钉住。</p>
+    </article>
+    <article>
+      <h3>缩写与关系违背 → 必须精确命中</h3>
+      <p>问「AGC 上升 RSL 下降属于哪一类异常」，缩写词与方向组合是判据本身，
+         靠 ik 分词 + 全文索引精确命中，再靠融合把语义近邻一起带上来。</p>
+    </article>
+  </div>
+  <p class="point">实测 8 个真实问题：平均 <b>5.0 段</b>两路都认可、<b>3.0 段</b>只有语义能找到、<b>3.0 段</b>只有关键词能命中、
+     混合后平均 <b>4.5 个段落排名发生变动</b>——融合不是装饰，它确实改变了结果。</p>
+</section>
+
+<section id="features">
+  <h2>核心功能</h2>
+  <div class="cards grid">
+    <article><h3>四路检索</h3><p>semantic（VECTOR + cosine + HNSW + <code>APPROXIMATE</code>）、keyword（FULLTEXT + ik + BM25）、
+      hybrid 原生 RRF（融合发生在数据库内部）、hybrid 可调权重（单条 SQL 内归一化 + 加权）。</p></article>
+    <article><h3>结构化过滤下推</h3><p>文档类型 / 语言 / 页码进 DSL 的 <code>filter</code> 子句，与 ANN、全文检索同一个执行计划下推，不是召回后再过滤。</p></article>
+    <article><h3>三路对比面板</h3><p>同一问题在三条路径下的排名并排展示，「仅语义 / 仅关键词 / 两路共有」一眼看清混合检索改变了什么。</p></article>
+    <article><h3>以段找段</h3><p>复用向量索引做段落到段落近邻：顺着一条判据段找到同族方法的伪代码与参数表行。</p></article>
+    <article><h3>SQL 全透明</h3><p>每次检索返回 seekdb 实际执行/生成的 SQL——包括原生混合检索的内部生成 SQL——前端可展开逐字核对。</p></article>
+    <article><h3>检索留痕</h3><p><code>search_log</code> 记录每次查询的模式、权重、耗时、结果数与真实 SQL，可回溯复现。</p></article>
+    <article><h3>离线快照导出</h3><p>把真实结果与每段原始 vsim / bm25 导出为 JSON；本页的交互演示就是拿它在你浏览器里重算的。</p></article>
+    <article><h3>多格式导入</h3><p>pdf 按页、md 按大纲、csv 按行块、txt 按滑窗分块；自动合成「文件名 · 首级标题」、识别中英文与文档类型。</p></article>
+  </div>
+</section>
+
+<section id="anatomy">
+  <h2>技术解剖：seekdb 到底执行了什么</h2>
+  <p>下面每一段 SQL 都来自服务器真实查询（采集于 2026-10-30，原文见仓库
+     <code>docs/SEEKDB_EVIDENCE.md</code> 与 <code>logs/verify_paths.txt</code>）。</p>
+
+  <h3>1 · 一张表，三类索引</h3>
+  <pre class="sql">CREATE TABLE `chunk` (
+  `chunk_id` bigint(20) NOT NULL,  `doc_id` varchar(64) NOT NULL,
+  `doc_title` varchar(512), `doc_kind` varchar(32), `source_path` varchar(1024),
+  `lang` varchar(8), `page_no` int(11), `section_path` varchar(1024),
+  `line_start` int(11), `line_end` int(11), `tags` varchar(512),
+  `content` text, `content_hash` char(32),
+  `emb` VECTOR(256),
+  KEY `idx_doc_id` (`doc_id`), KEY `idx_doc_kind` (`doc_kind`),
+  FULLTEXT KEY `ft_content`  (`content`)        WITH PARSER ik,
+  FULLTEXT KEY `ft_section`  (`section_path`)   WITH PARSER ik,
+  FULLTEXT KEY `ft_chunk`    (`content`, `section_path`) WITH PARSER ik,
+  VECTOR KEY `v_chunk_emb` (`emb`) WITH (DISTANCE=COSINE, TYPE=HNSW, LIB=VSAG,
+             M=16, EF_CONSTRUCTION=200, EF_SEARCH=64)
+);   -- 注意：没有用户主键（原因见下）</pre>
+
+  <h3>2 · 原生 RRF：融合在数据库内部完成</h3>
+  <p>应用侧只提交 DSL（<code>multi_match</code> + <code>knn</code> + <code>rank.rrf</code>），
+     用 <code>dbms_hybrid_search.get_sql()</code> 取回 seekdb 自己生成的 SQL，解剖出四条硬事实：</p>
+  <pre class="sql">_score = ifnull(1 / (_fts._keyword_rank + 60), 0)
+       + ifnull(1 / (_vs._semantic_rank + 60), 0)      -- 60 即 rank_constant，改它立刻改融合
+
+-- 全文分支窗口：LIMIT 1200 = 20 × rank_window_size(60)，固定 20 倍关系
+-- 语义分支打分：_semantic_score = round(1 - cosine_distance(emb, q) / 2, 8)
+-- 两路用隐藏列 __pk_increment 做 FULL JOIN  ← chunk 表不能有用户主键的原因
+--   （带用户主键直接 ERROR 1235: table with user provided primary key not supported）</pre>
+
+  <h3>3 · ERROR 1191 逼出来的三全文索引</h3>
+  <p>只有复合索引 <code>ft_chunk(content, section_path)</code> 时，原生 DSL 每次混合检索都报
+     <code>ERROR 1191: Can't find FULLTEXT index matching the column list</code>，
+     而手写 <code>MATCH(content, section_path)</code> 却正常。根因就在上面的生成 SQL 里：
+     原生全文分支永远生成<strong>单列</strong> <code>match(`content`)</code> 与 <code>match(`section_path`)</code>，
+     而 MATCH 命中全文索引的规则是列清单与某个索引<strong>完全相等</strong>。
+     于是补 <code>ft_content</code>、<code>ft_section</code> 两个单列索引服务原生 DSL，
+     保留 <code>ft_chunk</code> 服务手写复合 MATCH；旧表用 <code>python -m app.cli migrate</code> 在线补齐，不重灌数据。</p>
+
+  <h3>4 · 可调权重：权重是写进 SQL 的字面量</h3>
+  <pre class="sql">WITH v  AS (SELECT chunk_id, (1 - cosine_distance(emb, q)) AS vsim ... APPROXIMATE LIMIT 60),
+     f  AS (SELECT chunk_id, MATCH(content, section_path) AGAINST(? IN NATURAL LANGUAGE MODE) AS bm25 ...),
+     vn AS (SELECT *, MAX(vsim) OVER () AS vmax, ROW_NUMBER() OVER (ORDER BY vsim DESC) AS vrank FROM v),
+     fn AS (SELECT *, MAX(bm25) OVER () AS fmax, ROW_NUMBER() OVER (ORDER BY bm25 DESC) AS frank FROM f)
+SELECT ..., ROUND(0.6 * vsim/vmax + 0.4 * bm25/fmax, 6) AS fused
+FROM vn FULL JOIN fn ON vn.chunk_id = fn.chunk_id ...   -- FULL JOIN 保住「只被一路召回」的段落
+ORDER BY fused DESC LIMIT 8                              -- seekdb 侧平均 9.90 ms</pre>
+</section>
+
+<section id="shots">
+  <h2>演示截图</h2>
+  <p>截图来自真实运行的检索工作台（1440×900，headless Edge 采集），每张都对应一条可复现的深链。</p>
+  <div class="shots">
+    <figure>
+      <a href="shots/01-hybrid-rrf.png" target="_blank" rel="noopener"><img src="shots/01-hybrid-rrf.png" alt="原生 RRF 检索结果" loading="lazy"></a>
+      <figcaption>原生 RRF：命中词高亮、RRF 分数、chunk 出处与「查看 SQL」</figcaption>
+    </figure>
+    <figure>
+      <a href="shots/02-weighted.png" target="_blank" rel="noopener"><img src="shots/02-weighted.png" alt="可调权重检索结果" loading="lazy"></a>
+      <figcaption>可调权重 w=0.70：融合 / 语义 / BM25 三分数条与两路排名</figcaption>
+    </figure>
+    <figure>
+      <a href="shots/03-compare.png" target="_blank" rel="noopener"><img src="shots/03-compare.png" alt="三路对比面板" loading="lazy"></a>
+      <figcaption>三路对比：两路共有 / 仅语义 / 仅关键词 与逐段排名变动</figcaption>
+    </figure>
+    <figure>
+      <a href="shots/04-about.png" target="_blank" rel="noopener"><img src="shots/04-about.png" alt="运行环境与 SQL 证据面板" loading="lazy"></a>
+      <figcaption>运行环境面板：实例、索引、语料规模与 SHOW CREATE TABLE 原文</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="demo">
+  <h2>体验入口：离线交互演示</h2>
+  <p class="demo-note">下面的工作台<strong>不连任何服务器</strong>。数据是 2026-10-30 从 seekdb 导出的真实快照
+     （<code>snapshot.json</code>，8 个问题 × 候选池每段的原始 vsim / bm25）。
+     切换路径、拖滑块时，分数由你的浏览器基于这些原始值重算；
+     当权重恰好落在 0 / 0.3 / 0.5 / 0.7 / 1.0 五档时，直接展示 seekdb 真实执行的排序并打「真实执行」徽章。</p>
+  <div class="demo" id="demo-root">
+    <div class="demo-bar">
+      <label>预设问题
+        <select id="d-q"></select>
+      </label>
+      <div class="seg" id="d-mode" role="tablist" aria-label="检索路径">
+        <button data-mode="semantic">语义</button>
+        <button data-mode="keyword">关键词</button>
+        <button data-mode="rrf" class="on">原生 RRF</button>
+        <button data-mode="weighted">可调权重</button>
+      </div>
+      <label class="rng">语义权重 <input type="range" id="d-w" min="0" max="1" step="0.05" value="0.6"><output id="d-w-out">0.60</output></label>
+      <label class="rng">rank_constant <input type="range" id="d-rc" min="10" max="200" step="5" value="60"><output id="d-rc-out">60</output></label>
+      <label>top_k
+        <select id="d-k"><option>5</option><option selected>8</option><option>10</option></select>
+      </label>
+    </div>
+    <div class="demo-sub" id="d-sub"></div>
+    <div class="demo-body">
+      <ol class="hits" id="d-hits"></ol>
+      <aside class="demo-side">
+        <div class="side-card">
+          <h4>本次执行</h4>
+          <dl id="d-meta"></dl>
+        </div>
+        <div class="side-card">
+          <h4>seekdb 真实权重档</h4>
+          <div class="chips" id="d-variants"></div>
+          <p class="tiny">点击跳到该档：展示 seekdb 真实执行的排序与耗时。</p>
+        </div>
+        <div class="side-card">
+          <h4>三路对比</h4>
+          <div id="d-compare"></div>
+        </div>
+      </aside>
+    </div>
+    <details class="sqlbox" id="d-sqlbox">
+      <summary>查看本次 SQL（seekdb 实际执行 / 生成）</summary>
+      <pre class="sql" id="d-sql"></pre>
+    </details>
+  </div>
+</section>
+
+<section id="evidence">
+  <h2>验证与效果数据</h2>
+  <p>不做人工标注，因此不报 precision/recall；报的是可观测指标与可复算的原始日志
+     （<code>logs/eval_postfix.txt</code>、<code>logs/smoke_api.txt</code>、<code>logs/verify_paths.txt</code>）。</p>
+  <h3>8 个真实问题 × 3 条路径（top_k=8，全部 8/8 召回）</h3>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>问题</th><th>语义</th><th>关键词</th><th>混合</th><th>两路共有</th><th>仅语义</th><th>仅关键词</th><th>排名变动</th></tr></thead>
+    <tbody>
+      <tr><td>持续小幅慢漂移用哪种方法在线检测</td><td>8</td><td>8</td><td>8</td><td>5</td><td>3</td><td>3</td><td>5</td></tr>
+      <tr><td>CUSUM 的 k 和 h 怎么标定</td><td>8</td><td>8</td><td>8</td><td>3</td><td>5</td><td>5</td><td>5</td></tr>
+      <tr><td>单点毛刺应该用哪个方法</td><td>8</td><td>8</td><td>8</td><td>6</td><td>2</td><td>2</td><td>4</td></tr>
+      <tr><td>报警拖尾导致误判故障仍在持续</td><td>8</td><td>8</td><td>8</td><td>5</td><td>3</td><td>3</td><td>4</td></tr>
+      <tr><td>AGC 上升 RSL 下降属于哪一类异常</td><td>8</td><td>8</td><td>8</td><td>4</td><td>4</td><td>4</td><td>3</td></tr>
+      <tr><td>哪些方法对持续电平型故障结构性失明</td><td>8</td><td>8</td><td>8</td><td>7</td><td>1</td><td>1</td><td>6</td></tr>
+      <tr><td>误报预算怎么用蒙特卡洛重新标定</td><td>8</td><td>8</td><td>8</td><td>5</td><td>3</td><td>3</td><td>4</td></tr>
+      <tr><td>unsupervised anomaly detection for spacecraft telemetry</td><td>8</td><td>8</td><td>8</td><td>5</td><td>3</td><td>3</td><td>5</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <h3>耗时（seekdb 侧，8 问题平均）</h3>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>路径</th><th>seekdb 侧</th><th>端到端（含向量化）</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>semantic</td><td>4.12 ms</td><td>21.8 ms</td><td>VECTOR + HNSW 近似 ANN</td></tr>
+      <tr><td>keyword</td><td>3.70 ms</td><td>20.6 ms</td><td>FULLTEXT + ik + BM25</td></tr>
+      <tr><td>hybrid / 原生 RRF</td><td>116.38 ms</td><td>134.3 ms</td><td>窗口函数 + 双路召回的固有代价</td></tr>
+      <tr><td>hybrid / 加权单 SQL</td><td>9.90 ms</td><td>—</td><td>CTE + 窗口归一化 + FULL JOIN</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <h3>验证样例（可复算）</h3>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>验证样例</th><th>想证明什么</th><th>实测结果</th></tr></thead>
+    <tbody>
+      <tr><td>「持续小幅慢漂移用哪种方法在线检测」走语义路</td><td>正文无「在线检测」词组时向量能否跨措辞召回</td><td>Top1 = 规则汇总 · M04 Page–Hinkley 段（vec=0.4213）；该段仅语义排名 2、关键词排名 4</td></tr>
+      <tr><td>「CUSUM 的 k 和 h 怎么标定」走关键词路</td><td>精确词元能否钉住参数标定段</td><td>Top1 = M04 判据段（bm25=2.4459 起），命中词元 k / h / 标定 高亮</td></tr>
+      <tr><td>同一问题切原生 RRF</td><td>融合是否真的改变排名</td><td>Top1 变为 M04 伪代码段（RRF 0.0320），8 段中 5 段排名变动</td></tr>
+      <tr><td><code>doc_kind=['paper']</code> 过滤</td><td>过滤是否与向量/全文同计划下推</td><td>n=8 / 110.961 ms，结果全部为论文段</td></tr>
+      <tr><td>HTTP 冒烟 46 项</td><td>端点、参数校验、目录穿越拦截、四路径 SQL 回显</td><td>46 PASS / 0 FAIL</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section id="run">
+  <h2>运行说明</h2>
+  <pre class="sql"># 一键复现（隔离 seekdb 实例 → 依赖 → 建表导入 → 效果验证 → 快照 → 起服务）
+git clone https://github.com/helloworldzxcvbnm/seeklit.git && cd seeklit
+cp .env.example .env                      # 全部配置项都有默认值，可跳过
+bash scripts/setup.sh                     # 语料放 corpus_raw/{notes,records,papers}/
+# 打开 http://127.0.0.1:8090/
+
+# 单步
+bash scripts/start_seekdb.sh              # 隔离实例：独立 base-dir + 端口 10100
+pip install -r requirements.txt           # 必装仅 pymysql + pypdf
+python -m app.cli ingest --mode rebuild
+python -m app.cli search "CUSUM 的 k 和 h 怎么标定" --mode hybrid --fusion rrf --show-sql
+python -m app.cli compare "单点毛刺应该用哪个方法"
+python -m app.cli eval                    # 重跑上面的效果表
+python -m app.cli snapshot                # 导出本站内嵌的快照 JSON
+bash scripts/stop_seekdb.sh</pre>
+  <p>环境要求：Python ≥ 3.10、seekdb v1.4.0.0（MySQL 协议）。
+     建表 DDL 见 <code>sql/schema.sql</code>；配置项见 <code>.env.example</code>；
+     向量化后端可用 <code>EMBED_BACKEND=ollama|openai|sentence_transformers</code> 一行切换（切换后需重灌 <code>emb</code>）。</p>
+</section>
+
+<section id="devlog">
+  <h2>Qoder 开发记录</h2>
+  <p>从空目录到可发布站点，全部编码、调试、验证、截图与站点构建都在 Qoder 会话内完成
+     （完整实录见仓库 <code>docs/QODER_DEVLOG.md</code>）。</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>时间（10-29 → 10-30）</th><th>事件</th></tr></thead>
+    <tbody>
+      <tr><td>23:15</td><td>立项：方向、语料范围（排除可能涉密的标书目录）、仅用 seekdb 的约束</td></tr>
+      <tr><td>23:29–00:08</td><td>五模块骨架 + 分块管线 + 离线 LSA 向量化后端（预留三个神经后端开关）</td></tr>
+      <tr><td>00:12–00:26</td><td>撞 ERROR 1191 → 写探针脚本定位根因 → 三全文索引方案 + 在线 migrate 命令</td></tr>
+      <tr><td>00:33–00:34</td><td>采集第一版 SQL 证据；发现 plink 传中文被重编码，检索词改为代码内常量</td></tr>
+      <tr><td>00:39–00:43</td><td>耗时剖析抓出 embedder 单例失效（global 拼写错误，每次重读 6.5 MB 模型）；修复后 semantic 91→9.9 ms</td></tr>
+      <tr><td>00:44–00:52</td><td>标题合成修复并重灌语料；46 项 HTTP 冒烟；快照导出（Decimal / 向量字面量 / 截断处理）</td></tr>
+      <tr><td>00:56–01:04</td><td>前端深链 + headless Edge 桌面截图；冒烟复跑 46/46；eval 复跑得到修复后效果表</td></tr>
+      <tr><td>01:05–01:35</td><td>仓库化（schema.sql / 启停脚本 / 证据文档 / 开发记录）→ 推送 GitHub → 构建本站并发布</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="point">Qoder 在本项目里做对的三件事：把报错当线索（1191 与 1235 直接塑造了表结构，并变成可展示的解剖材料）；
+     所有数字可复算（效果表、耗时、排名差异都附采集脚本与原始日志）；演示不依赖服务器（快照带原始分数，浏览器重算）。</p>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap foot-in">
+    <div>
+      <strong>溯文 SeekLit</strong>
+      <p>基于 OceanBase seekdb v1.4.0.0 · Qoder × OceanBase 参赛作品<br>
+         快照采集于 2026-10-30 · 语料 26 篇 / 508 段 / 271,656 字符</p>
+    </div>
+    <div>
+      <a href="https://github.com/helloworldzxcvbnm/seeklit" target="_blank" rel="noopener">代码仓库 github.com/helloworldzxcvbnm/seeklit</a>
+      <a href="#demo">离线体验入口</a>
+      <a href="#evidence">验证与效果数据</a>
+    </div>
+  </div>
+</footer>
+
+<script src="demo.js"></script>
+</body>
+</html>
